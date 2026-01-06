@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import zipfile
+import gc  # [수정 1] 메모리 관리를 위한 모듈 추가
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
@@ -310,12 +311,12 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     return (scene_num, f"일러스트 묘사: {text_chunk}")
 
 # ==========================================
-# [함수] 3. 이미지 생성 (스타일 강제 적용 수정됨)
+# [함수] 3. 이미지 생성 (메모리 누수 방지 추가됨)
 # ==========================================
 def generate_image(client, prompt, filename, output_dir, selected_model_name, style_instruction):
     full_path = os.path.join(output_dir, filename)
     
-    # [수정됨] 스타일 지침을 최종 프롬프트에 강제로 결합 (실사화 방지 핵심)
+    # [수정됨] 스타일 지침을 최종 프롬프트에 강제로 결합
     final_prompt = f"{style_instruction}\n\n[장면 묘사]: {prompt}"
     
     # 재시도 설정
@@ -334,7 +335,7 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
             # 이미지 생성 요청
             response = client.models.generate_content(
                 model=selected_model_name,
-                contents=[final_prompt], # [수정됨] 결합된 프롬프트 사용
+                contents=[final_prompt],
                 config=types.GenerateContentConfig(
                     image_config=types.ImageConfig(aspect_ratio="16:9"),
                     safety_settings=safety_settings 
@@ -347,6 +348,13 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
                         img_data = part.inline_data.data
                         image = Image.open(BytesIO(img_data))
                         image.save(full_path)
+                        
+                        # [수정 2] 메모리 정리 (중요)
+                        image.close()
+                        del img_data
+                        del image
+                        gc.collect()  # 강제 메모리 회수
+                        
                         return full_path
             
             # 응답은 왔으나 이미지가 없는 경우
@@ -372,7 +380,7 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
 with st.sidebar:
     st.title("⚙️ 설정")
     
-    # API Key 입력 로직 (에러 방지)
+    # API Key 입력 로직
     api_key = ""
     try:
         if "general" in st.secrets and "google_api_key" in st.secrets["general"]:
@@ -402,7 +410,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # [설정 고정]
     SELECTED_GENRE_MODE = "info"
 
     st.subheader("🖌️ 그림체 지침")
@@ -416,7 +423,8 @@ with st.sidebar:
     style_instruction = st.text_area("스타일 프롬프트", value=default_style.strip(), height=200)
     
     st.markdown("---")
-    max_workers = st.slider("작업 속도", 1, 10, 5)
+    # [수정 3] 작업 속도 기본값 하향 조정 (서버 부하 방지)
+    max_workers = st.slider("작업 속도 (안전 권장: 3~4)", 1, 10, 4)
 
 # ==========================================
 # [UI] 메인 화면
@@ -430,7 +438,7 @@ if 'generated_results' not in st.session_state:
 if 'video_title' not in st.session_state:
     st.session_state['video_title'] = ""
 
-st.write("") # 여백
+st.write("") 
 
 col_title_input, col_space = st.columns([3, 1])
 with col_title_input:
@@ -440,7 +448,7 @@ with col_title_input:
         placeholder="예: 부자들의 3가지 습관 (전체 분위기 결정)",
     )
 
-st.write("") # 여백
+st.write("")
 
 script_input = st.text_area(
     "📜 대본 입력 (여기에 붙여넣기)", 
@@ -451,8 +459,10 @@ script_input = st.text_area(
 # [버튼 클릭 시 초기화 함수]
 def clear_generated_results():
     st.session_state['generated_results'] = []
+    # [수정 4] 추가적인 메모리 정리
+    gc.collect()
 
-st.write("") # 여백
+st.write("") 
 start_btn = st.button("🚀 이미지 생성 시작하기", type="primary", use_container_width=True, on_click=clear_generated_results)
 
 if start_btn:
@@ -464,7 +474,10 @@ if start_btn:
         # 초기화 및 폴더 준비
         st.session_state['generated_results'] = [] 
         if os.path.exists(IMAGE_OUTPUT_DIR):
-            shutil.rmtree(IMAGE_OUTPUT_DIR)
+            try:
+                shutil.rmtree(IMAGE_OUTPUT_DIR)
+            except Exception as e:
+                print(f"Error removing dir: {e}")
         init_folders()
         
         client = genai.Client(api_key=api_key)
@@ -485,7 +498,10 @@ if start_btn:
         # 2. 프롬프트 생성 (병렬)
         status_box.write(f"📝 프롬프트 작성 중... (Mode: Bright & Flat)")
         prompts = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        
+        # [수정 5] 과부하 방지: 고정값(10) 제거하고 슬라이더 설정값(max_workers) 따르도록 수정
+        safe_workers = max_workers 
+        with ThreadPoolExecutor(max_workers=safe_workers) as executor:
             futures = []
             
             for i, chunk in enumerate(chunks):
@@ -516,10 +532,8 @@ if start_btn:
                 orig_text = chunks[idx]
                 fname = make_filename(s_num, orig_text)
                 
-                # 순서 꼬임 방지 미세 지연
-                time.sleep(0.1) 
+                time.sleep(0.2) # [수정 6] 안정성을 위한 대기 시간 소폭 증가
                 
-                # [수정됨] generate_image 함수에 style_instruction을 전달 (실사화 방지)
                 future = executor.submit(
                     generate_image, 
                     client, 
@@ -594,7 +608,7 @@ if st.session_state['generated_results']:
                                 current_title, SELECTED_GENRE_MODE
                             )
                             
-                            # 2. 이미지 생성 ([수정됨] style_instruction 전달)
+                            # 2. 이미지 생성
                             new_path = generate_image(
                                 client, new_prompt, item['filename'], 
                                 IMAGE_OUTPUT_DIR, SELECTED_IMAGE_MODEL,
