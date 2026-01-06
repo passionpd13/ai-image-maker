@@ -234,7 +234,7 @@ def create_zip_buffer(source_dir):
     return buffer
 
 # ==========================================
-# [함수] 2. 프롬프트 생성 (한국어 고정 + Bright & Flat)
+# [함수] 2. 프롬프트 생성 (재시도 및 503 에러 처리 수정됨)
 # ==========================================
 def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, genre_mode="info"):
     scene_num = index + 1
@@ -285,27 +285,38 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
         "contents": [{"parts": [{"text": f"지시사항(Instruction):\n{full_instruction}\n\n대본 내용(Script Segment):\n\"{text_chunk}\"\n\n이미지 프롬프트 결과:"}]}]
     }
 
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        if response.status_code == 200:
-            try:
-                prompt = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-            except:
-                prompt = text_chunk
-            return (scene_num, prompt)
-        elif response.status_code == 429:
-            time.sleep(2)
-            return (scene_num, f"일러스트 묘사: {text_chunk}")
-        else:
-            return (scene_num, f"Error generating prompt: {response.status_code}")
-    except Exception as e:
-        return (scene_num, f"Error: {e}")
+    # [수정됨] 재시도 로직 강화 (503 에러 대응)
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(payload))
+            if response.status_code == 200:
+                try:
+                    prompt = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                except:
+                    prompt = text_chunk
+                return (scene_num, prompt)
+            
+            # 503(Service Unavailable)이나 429(Too Many Requests)일 경우 대기 후 재시도
+            elif response.status_code in [429, 503, 500]:
+                time.sleep(2 * attempt)
+                continue
+            else:
+                return (scene_num, f"Error generating prompt: {response.status_code}")
+        except Exception as e:
+            time.sleep(1)
+            continue
+            
+    # 모든 시도 실패 시 원문 반환
+    return (scene_num, f"일러스트 묘사: {text_chunk}")
 
 # ==========================================
-# [함수] 3. 이미지 생성 (API 제한 대응)
+# [함수] 3. 이미지 생성 (스타일 강제 적용 수정됨)
 # ==========================================
-def generate_image(client, prompt, filename, output_dir, selected_model_name):
+def generate_image(client, prompt, filename, output_dir, selected_model_name, style_instruction):
     full_path = os.path.join(output_dir, filename)
+    
+    # [수정됨] 스타일 지침을 최종 프롬프트에 강제로 결합 (실사화 방지 핵심)
+    final_prompt = f"{style_instruction}\n\n[장면 묘사]: {prompt}"
     
     # 재시도 설정
     max_retries = 5
@@ -323,7 +334,7 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name):
             # 이미지 생성 요청
             response = client.models.generate_content(
                 model=selected_model_name,
-                contents=[prompt],
+                contents=[final_prompt], # [수정됨] 결합된 프롬프트 사용
                 config=types.GenerateContentConfig(
                     image_config=types.ImageConfig(aspect_ratio="16:9"),
                     safety_settings=safety_settings 
@@ -344,10 +355,10 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name):
             
         except Exception as e:
             error_msg = str(e)
-            # 429 에러(속도 제한) 대응
-            if "429" in error_msg or "ResourceExhausted" in error_msg:
-                wait_time = (5 * attempt) + random.uniform(1, 3)
-                print(f"🛑 [API 제한] {filename} - {wait_time:.1f}초 대기 후 재시도... (시도 {attempt})")
+            # 429 에러(속도 제한) 및 503 에러 대응
+            if "429" in error_msg or "ResourceExhausted" in error_msg or "503" in error_msg:
+                wait_time = (3 * attempt) + random.uniform(1, 3)
+                print(f"🛑 [API 제한/서버오류] {filename} - {wait_time:.1f}초 대기 후 재시도... (시도 {attempt})")
                 time.sleep(wait_time)
             else:
                 print(f"⚠️ [에러] {error_msg} ({filename}) - 5초 대기")
@@ -379,7 +390,6 @@ with st.sidebar:
     st.subheader("🖼️ 모델 선택")
     model_choice = st.radio("모델:", ("나노바나나 프로", "나노바나나"), index=0)
     
-    # [수정된 부분] 선택지 이름("나노바나나 프로")과 비교하도록 수정
     if "나노바나나 프로" in model_choice:
         SELECTED_IMAGE_MODEL = "gemini-3-pro-image-preview" 
     else:
@@ -509,7 +519,16 @@ if start_btn:
                 # 순서 꼬임 방지 미세 지연
                 time.sleep(0.1) 
                 
-                future = executor.submit(generate_image, client, prompt_text, fname, IMAGE_OUTPUT_DIR, SELECTED_IMAGE_MODEL)
+                # [수정됨] generate_image 함수에 style_instruction을 전달 (실사화 방지)
+                future = executor.submit(
+                    generate_image, 
+                    client, 
+                    prompt_text, 
+                    fname, 
+                    IMAGE_OUTPUT_DIR, 
+                    SELECTED_IMAGE_MODEL,
+                    style_instruction 
+                )
                 future_to_meta[future] = (s_num, fname, orig_text, prompt_text)
             
             # 결과 수집
@@ -575,10 +594,11 @@ if st.session_state['generated_results']:
                                 current_title, SELECTED_GENRE_MODE
                             )
                             
-                            # 2. 이미지 생성
+                            # 2. 이미지 생성 ([수정됨] style_instruction 전달)
                             new_path = generate_image(
                                 client, new_prompt, item['filename'], 
-                                IMAGE_OUTPUT_DIR, SELECTED_IMAGE_MODEL
+                                IMAGE_OUTPUT_DIR, SELECTED_IMAGE_MODEL,
+                                style_instruction 
                             )
                             
                             if new_path:
