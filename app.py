@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import zipfile
-import gc  # [수정 1] 메모리 관리를 위한 모듈 추가
+import gc 
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# [디자인] 다크모드 & 빅 텍스트 CSS 적용
+# [디자인] 다크모드 & 빅 텍스트 CSS 적용 (원본 유지)
 # ==========================================
 st.markdown("""
     <style>
@@ -235,7 +235,7 @@ def create_zip_buffer(source_dir):
     return buffer
 
 # ==========================================
-# [함수] 2. 프롬프트 생성 (재시도 및 503 에러 처리 수정됨)
+# [함수] 2. 프롬프트 생성 (안정성 최적화)
 # ==========================================
 def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, genre_mode="info"):
     scene_num = index + 1
@@ -286,7 +286,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
         "contents": [{"parts": [{"text": f"지시사항(Instruction):\n{full_instruction}\n\n대본 내용(Script Segment):\n\"{text_chunk}\"\n\n이미지 프롬프트 결과:"}]}]
     }
 
-    # [수정됨] 재시도 로직 강화 (503 에러 대응)
+    # [최적화] 대기 시간 로직 개선
     for attempt in range(1, 4):
         try:
             response = requests.post(url, headers=headers, data=json.dumps(payload))
@@ -297,9 +297,9 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
                     prompt = text_chunk
                 return (scene_num, prompt)
             
-            # 503(Service Unavailable)이나 429(Too Many Requests)일 경우 대기 후 재시도
+            # 에러 발생 시에만 대기 (스마트 대기)
             elif response.status_code in [429, 503, 500]:
-                time.sleep(2 * attempt)
+                time.sleep(1.5 * attempt)
                 continue
             else:
                 return (scene_num, f"Error generating prompt: {response.status_code}")
@@ -311,7 +311,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     return (scene_num, f"일러스트 묘사: {text_chunk}")
 
 # ==========================================
-# [함수] 3. 이미지 생성 (메모리 누수 방지 추가됨)
+# [함수] 3. 이미지 생성 (속도 & 안정성 하이브리드)
 # ==========================================
 def generate_image(client, prompt, filename, output_dir, selected_model_name, style_instruction):
     full_path = os.path.join(output_dir, filename)
@@ -319,8 +319,8 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
     # [수정됨] 스타일 지침을 최종 프롬프트에 강제로 결합
     final_prompt = f"{style_instruction}\n\n[장면 묘사]: {prompt}"
     
-    # 재시도 설정
-    max_retries = 5
+    # 재시도 설정 (속도를 위해 3회로 최적화)
+    max_retries = 3
     
     # 안전 필터 설정
     safety_settings = [
@@ -349,23 +349,22 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
                         image = Image.open(BytesIO(img_data))
                         image.save(full_path)
                         
-                        # [수정 2] 메모리 정리 (중요)
+                        # [속도 향상] 여기서 gc.collect() 삭제하고 가벼운 삭제만 수행
                         image.close()
                         del img_data
                         del image
-                        gc.collect()  # 강제 메모리 회수
                         
                         return full_path
             
-            # 응답은 왔으나 이미지가 없는 경우
+            # 응답은 왔으나 이미지가 없는 경우 잠시 대기
             print(f"⚠️ [시도 {attempt}/{max_retries}] 이미지 데이터 없음. 재시도... ({filename})")
-            time.sleep(2)
+            time.sleep(1)
             
         except Exception as e:
             error_msg = str(e)
             # 429 에러(속도 제한) 및 503 에러 대응
             if "429" in error_msg or "ResourceExhausted" in error_msg or "503" in error_msg:
-                wait_time = (3 * attempt) + random.uniform(1, 3)
+                wait_time = (2 * attempt) # 점진적 대기
                 print(f"🛑 [API 제한/서버오류] {filename} - {wait_time:.1f}초 대기 후 재시도... (시도 {attempt})")
                 time.sleep(wait_time)
             else:
@@ -423,8 +422,8 @@ with st.sidebar:
     style_instruction = st.text_area("스타일 프롬프트", value=default_style.strip(), height=200)
     
     st.markdown("---")
-    # [수정 3] 작업 속도 기본값 하향 조정 (서버 부하 방지)
-    max_workers = st.slider("작업 속도 (안전 권장: 3~4)", 1, 10, 4)
+    # [설정] 속도와 안정성을 위해 기본값 조정 (4~5 권장)
+    max_workers = st.slider("작업 속도 (권장: 4~5)", 1, 10, 5)
 
 # ==========================================
 # [UI] 메인 화면
@@ -459,7 +458,7 @@ script_input = st.text_area(
 # [버튼 클릭 시 초기화 함수]
 def clear_generated_results():
     st.session_state['generated_results'] = []
-    # [수정 4] 추가적인 메모리 정리
+    # [최적화] 시작할 때만 메모리 청소 (매번 하면 느려짐)
     gc.collect()
 
 st.write("") 
@@ -499,9 +498,8 @@ if start_btn:
         status_box.write(f"📝 프롬프트 작성 중... (Mode: Bright & Flat)")
         prompts = []
         
-        # [수정 5] 과부하 방지: 고정값(10) 제거하고 슬라이더 설정값(max_workers) 따르도록 수정
-        safe_workers = max_workers 
-        with ThreadPoolExecutor(max_workers=safe_workers) as executor:
+        # [최적화] 프롬프트는 텍스트라 가볍지만 10개는 많을 수 있으니 max_workers 값 활용
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             
             for i, chunk in enumerate(chunks):
@@ -521,7 +519,7 @@ if start_btn:
         
         prompts.sort(key=lambda x: x[0])
         
-        # 3. 이미지 생성 (병렬 처리)
+        # 3. 이미지 생성 (병렬 처리 - 핵심 최적화 구간)
         status_box.write(f"🎨 이미지 생성 중 ({SELECTED_IMAGE_MODEL})...")
         results = []
         
@@ -532,7 +530,9 @@ if start_btn:
                 orig_text = chunks[idx]
                 fname = make_filename(s_num, orig_text)
                 
-                time.sleep(0.2) # [수정 6] 안정성을 위한 대기 시간 소폭 증가
+                # [속도] 강제 sleep 제거, executor에 바로 제출
+                # [안정성] 다만 너무 동시다발적 요청을 막기 위해 아주 미세한 지연
+                time.sleep(0.05) 
                 
                 future = executor.submit(
                     generate_image, 
