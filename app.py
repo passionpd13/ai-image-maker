@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import zipfile
-import gc 
+import gc
 import uuid  # [수정] 고유 ID 생성을 위해 추가
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,8 +19,8 @@ from google.genai import types
 # [설정] 페이지 기본 설정
 # ==========================================
 st.set_page_config(
-    page_title="열정피디 AI 씬 생성기 (Pro)", 
-    layout="wide", 
+    page_title="열정피디 AI 씬 생성기 (Pro)",
+    layout="wide",
     page_icon="🎨",
     initial_sidebar_state="expanded"
 )
@@ -50,10 +50,10 @@ st.markdown("""
         color: #FFFFFF !important;
         font-family: 'Pretendard', 'Malgun Gothic', sans-serif;
     }
-    
+
     /* 2. 전체 글씨 크기 확대 */
     p, div, label, span, li {
-        font-size: 1.15rem !important; 
+        font-size: 1.15rem !important;
         line-height: 1.6;
         color: #FFFFFF !important;
     }
@@ -81,13 +81,13 @@ st.markdown("""
 
     /* 4. 입력창 라벨 (제목, 대본 등) 아주 크게 */
     .stTextInput label p, .stTextArea label p, .stSelectbox label p {
-        font-size: 1.6rem !important; 
+        font-size: 1.6rem !important;
         font-weight: 700 !important;
         color: #FFD700 !important;
         text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
         margin-bottom: 10px !important;
     }
-    
+
     /* [긴급 수정 2] 입력창 내부 텍스트 및 안내 문구(Placeholder) 색상 변경 */
     .stTextInput input, .stTextArea textarea {
         background-color: #262730 !important;
@@ -97,7 +97,7 @@ st.markdown("""
         border-radius: 12px !important;
         border: 2px solid #4A4A4A !important;
     }
-    
+
     /* 안내 문구(Placeholder) 색상 강제 지정 */
     .stTextInput input::placeholder, .stTextArea textarea::placeholder {
         color: #CCCCCC !important; /* 밝은 회색 */
@@ -129,7 +129,7 @@ st.markdown("""
         box-shadow: 0 6px 20px rgba(37, 117, 252, 0.7);
         color: #FFFFFF !important;
     }
-    
+
     /* 6. 결과 카드 스타일 */
     [data-testid="stVerticalBlock"] > [style*="border"] {
         background-color: #1A1C24 !important;
@@ -167,7 +167,7 @@ st.markdown("""
         border-color: #E100FF !important;
         color: #E100FF !important;
     }
-    
+
     .streamlit-expanderHeader {
         color: #FFFFFF !important;
         font-weight: bold !important;
@@ -184,7 +184,7 @@ st.markdown("""
 BASE_PATH = "./web_result_files"
 
 # 텍스트 모델 설정 (프롬프트 작성용)
-GEMINI_TEXT_MODEL_NAME = "gemini-2.5-pro" 
+GEMINI_TEXT_MODEL_NAME = "gemini-2.5-pro"
 
 # ==========================================
 # [함수] 1. 기본 유틸리티
@@ -211,14 +211,14 @@ def make_filename(scene_num, text_chunk):
     clean_line = text_chunk.replace("\n", " ").strip()
     clean_line = re.sub(r'[\\/:*?"<>|]', "", clean_line)
     words = clean_line.split()
-    
+
     if len(words) <= 6:
         summary = " ".join(words)
     else:
         start_part = " ".join(words[:3])
         end_part = " ".join(words[-3:])
         summary = f"{start_part}...{end_part}"
-    
+
     filename = f"S{scene_num:03d}_{summary}.png"
     return filename
 
@@ -234,7 +234,7 @@ def create_zip_buffer(source_dir):
     return buffer
 
 # ==========================================
-# [함수] 2. 프롬프트 생성 (지시사항 원본 복구 + 안전장치 추가)
+# [함수] 2. 프롬프트 생성 (오류 수정됨)
 # ==========================================
 def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, genre_mode="info"):
     scene_num = index + 1
@@ -245,7 +245,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     lang_guide = "화면 속 글씨는 **무조건 '한글(Korean)'로 표기**하십시오. (다른 언어 절대 금지)"
     lang_example = "(예: 'New York' -> '뉴욕', 'Tokyo' -> '도쿄')"
 
-    # [중요] 원본 프롬프트 지시사항 100% 유지
+    # [중요] 원본 프롬프트 지시사항 100% 유지 + 제목 텍스트화 방지 추가
     full_instruction = f"""
     [역할]
     당신은 복잡한 상황을 아주 쉽고 직관적인 그림으로 표현하는 '비주얼 커뮤니케이션 전문가'이자 '교육용 일러스트레이터'입니다.
@@ -255,7 +255,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
 
     [그림 스타일 가이드 - 절대 준수]
     {style_instruction}
-    
+
     [필수 연출 지침]
     1. **조명(Lighting):** 무조건 **'밝고 화사한 조명(High Key Lighting)'**을 사용하십시오. 그림자가 짙거나 어두운 부분은 없어야 합니다.
     2. **색감(Colors):** 채도가 높고 선명한 색상을 사용하여 시인성을 높이십시오. (칙칙하거나 회색조 톤 금지)
@@ -265,27 +265,29 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     6. **[텍스트 언어]:** {lang_guide} {lang_example}
     - **[절대 금지]:** 화면의 네 모서리(Corners)나 가장자리(Edges)에 글자를 배치하지 마십시오. 글자는 반드시 중앙 피사체 주변에만 연출하십시오.
     7. 캐릭터의 감정도 느껴진다.
+    8. **[제목 텍스트 금지]:** 상단에 적힌 '전체 영상 주제'는 오직 분위기 참고용입니다. **절대로 영상 제목을 이미지 내에 텍스트로 적지 마십시오.**
 
     [임무]
     제공된 대본 조각(Script Segment)을 바탕으로, 이미지 생성 AI가 그릴 수 있는 **구체적인 묘사 프롬프트**를 작성하십시오.
-    
+
     [작성 요구사항]
     - **분량:** 최소 5문장 이상으로 상세하게 묘사.
     - **포함 요소:**
         - **캐릭터 행동:** 대본의 상황을 연기하는 캐릭터의 구체적인 동작.
         - **배경:** 상황을 설명하는 소품이나 장소 (배경은 깔끔하게).
         - **시각적 은유:** 추상적인 내용일 경우, 이를 설명할 수 있는 시각적 아이디어 (예: 돈이 날아가는 모습, 그래프가 하락하는 모습 등).
-    
+
     [출력 형식]
     - **무조건 한국어(한글)**로만 작성하십시오.
     - 부가적인 설명 없이 **오직 프롬프트 텍스트만** 출력하십시오.
     """
-    
+
     # 2. 비상 요청 (안전 필터 걸렸을 때 순화용)
     instruction_safe = f"""
-    [Constraint] The previous request was blocked. 
+    [Constraint] The previous request was blocked.
     Write a VERY SAFE, abstract, educational illustration description about: "{video_title}"
     Do NOT include specific violent or sensitive details from the script.
+    Do NOT write the title text in the image.
     Just describe a bright, 2D vector art style background suitable for the topic.
     (Language: Korean)
     """
@@ -302,14 +304,14 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
 
     # [핵심] 재시도 횟수 5회 & 랜덤 대기 (병렬 충돌 방지)
     max_retries = 5
-    
+
     for attempt in range(1, max_retries + 1):
         try:
             # 병렬 처리 시 동시 요청 충돌을 막기 위한 랜덤 지연 (Jitter)
             time.sleep(random.uniform(0.1, 0.6))
-            
+
             response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
-            
+
             if response.status_code == 200:
                 data = response.json()
                 # 정상 응답 확인
@@ -331,7 +333,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
                 print(f"⚡ Scene {scene_num}: 과부하(429). {wait_time:.1f}초 대기 후 재시도...")
                 time.sleep(wait_time)
                 continue
-            
+
             else:
                 time.sleep(1)
                 continue
@@ -342,7 +344,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
 
     # [최후의 안전장치] 절대 대본 원문을 반환하지 않음
     print(f"❌ Scene {scene_num}: 최종 실패. 제목 기반 기본 프롬프트 사용.")
-    fallback_prompt = f"주제 '{video_title}'에 어울리는 밝고 깔끔한 교육용 2D 일러스트 배경. 텍스트 없이 심플하게."
+    fallback_prompt = f"주제 '{video_title}'에 어울리는 밝고 깔끔한 교육용 2D 일러스트 배경. (제목 텍스트 절대 금지) 텍스트 없이 심플하게."
     return (scene_num, fallback_prompt)
 
 # ==========================================
@@ -351,13 +353,13 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
 # [수정] output_dir를 인자로 받도록 변경
 def generate_image(client, prompt, filename, output_dir, selected_model_name, style_instruction):
     full_path = os.path.join(output_dir, filename)
-    
+
     # [수정됨] 스타일 지침을 최종 프롬프트에 강제로 결합
     final_prompt = f"{style_instruction}\n\n[장면 묘사]: {prompt}"
-    
+
     # 재시도 설정 (속도를 위해 3회로 최적화)
     max_retries = 3
-    
+
     # 안전 필터 설정
     safety_settings = [
         types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_ONLY_HIGH"),
@@ -374,27 +376,27 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
                 contents=[final_prompt],
                 config=types.GenerateContentConfig(
                     image_config=types.ImageConfig(aspect_ratio="16:9"),
-                    safety_settings=safety_settings 
+                    safety_settings=safety_settings
                 )
             )
-            
+
             if response.parts:
                 for part in response.parts:
                     if part.inline_data:
                         img_data = part.inline_data.data
                         image = Image.open(BytesIO(img_data))
                         image.save(full_path)
-                        
+
                         image.close()
                         del img_data
                         del image
-                        
+
                         return full_path
-            
+
             # 응답은 왔으나 이미지가 없는 경우 잠시 대기
             print(f"⚠️ [시도 {attempt}/{max_retries}] 이미지 데이터 없음. 재시도... ({filename})")
             time.sleep(1)
-            
+
         except Exception as e:
             error_msg = str(e)
             # 429 에러(속도 제한) 및 503 에러 대응
@@ -405,7 +407,7 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
             else:
                 print(f"⚠️ [에러] {error_msg} ({filename}) - 5초 대기")
                 time.sleep(5)
-            
+
     return None
 
 # ==========================================
@@ -413,7 +415,7 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
 # ==========================================
 with st.sidebar:
     st.title("⚙️ 설정")
-    
+
     # API Key 입력 로직
     api_key = ""
     try:
@@ -426,24 +428,24 @@ with st.sidebar:
         st.success("🔑 API Key가 로드되었습니다.")
     else:
         api_key = st.text_input("🔑 Google API Key", type="password", help="Google AI Studio 키 입력")
-    
+
     st.markdown("---")
-    
+
     st.subheader("🖼️ 모델 선택")
     model_choice = st.radio("모델:", ("나노바나나 프로", "나노바나나"), index=0)
-    
+
     if "나노바나나 프로" in model_choice:
-        SELECTED_IMAGE_MODEL = "gemini-3-pro-image-preview" 
+        SELECTED_IMAGE_MODEL = "gemini-3-pro-image-preview"
     else:
         SELECTED_IMAGE_MODEL = "gemini-2.5-flash-image"
-    
+
     st.markdown("---")
     st.subheader("⏱️ 장면 시간")
     chunk_duration = st.slider("초 단위:", 5, 60, 20, 5)
-    chars_limit = chunk_duration * 8 
-    
+    chars_limit = chunk_duration * 8
+
     st.markdown("---")
-    
+
     SELECTED_GENRE_MODE = "info"
 
     st.subheader("🖌️ 그림체 지침")
@@ -455,7 +457,7 @@ with st.sidebar:
 다양한 장소와 상황 연출로 배경을 디테일하게 한다. 무조건 2D 스틱맨 연출
     """
     style_instruction = st.text_area("스타일 프롬프트", value=default_style.strip(), height=200)
-    
+
     st.markdown("---")
     # [설정] 속도와 안정성을 위해 기본값 조정 (4~5 권장)
     max_workers = st.slider("작업 속도 (권장: 4~5)", 1, 10, 5)
@@ -472,21 +474,21 @@ if 'generated_results' not in st.session_state:
 if 'video_title' not in st.session_state:
     st.session_state['video_title'] = ""
 
-st.write("") 
+st.write("")
 
 col_title_input, col_space = st.columns([3, 1])
 with col_title_input:
     st.text_input(
         "📌 영상 제목/주제 (선택사항)",
-        key="video_title", 
+        key="video_title",
         placeholder="예: 부자들의 3가지 습관 (전체 분위기 결정)",
     )
 
 st.write("")
 
 script_input = st.text_area(
-    "📜 대본 입력 (여기에 붙여넣기)", 
-    height=350, 
+    "📜 대본 입력 (여기에 붙여넣기)",
+    height=350,
     placeholder="안녕하세요. 오늘은..."
 )
 
@@ -496,7 +498,7 @@ def clear_generated_results():
     # [최적화] 시작할 때만 메모리 청소 (매번 하면 느려짐)
     gc.collect()
 
-st.write("") 
+st.write("")
 start_btn = st.button("🚀 이미지 생성 시작하기", type="primary", use_container_width=True, on_click=clear_generated_results)
 
 if start_btn:
@@ -508,29 +510,29 @@ if start_btn:
         # [수정] 사용자별 고유 폴더 경로 설정 (충돌 방지 핵심)
         user_id = st.session_state['user_id']
         USER_DIR = os.path.join(BASE_PATH, user_id, "output_images")
-        
+
         # 초기화 및 폴더 준비 (내 폴더만 지웠다 다시 생성)
-        st.session_state['generated_results'] = [] 
+        st.session_state['generated_results'] = []
         if os.path.exists(USER_DIR):
             try:
                 shutil.rmtree(USER_DIR)
             except Exception as e:
                 print(f"Error removing dir: {e}")
-        
+
         # 폴더 생성
         os.makedirs(USER_DIR, exist_ok=True)
-        
+
         client = genai.Client(api_key=api_key)
-        
+
         status_box = st.status("작업 진행 중...", expanded=True)
         progress_bar = st.progress(0)
-        
+
         # 1. 대본 분할
         status_box.write(f"✂️ 대본 분할 중...")
         chunks = split_script_by_time(script_input, chars_per_chunk=chars_limit)
         total_scenes = len(chunks)
         status_box.write(f"✅ {total_scenes}개 장면으로 분할 완료.")
-        
+
         current_video_title = st.session_state.get('video_title', "").strip()
         if not current_video_title:
             current_video_title = "전반적인 대본 분위기에 어울리는 배경 (Context based on the script)"
@@ -538,60 +540,60 @@ if start_btn:
         # 2. 프롬프트 생성 (병렬 - 수정된 강력한 함수 사용)
         status_box.write(f"📝 프롬프트 작성 중... (Mode: Bright & Flat)")
         prompts = []
-        
+
         # [최적화] 프롬프트는 텍스트라 가볍지만 10개는 많을 수 있으니 max_workers 값 활용
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
-            
+
             for i, chunk in enumerate(chunks):
                 futures.append(executor.submit(
-                    generate_prompt, 
-                    api_key, 
-                    i, 
-                    chunk, 
-                    style_instruction, 
-                    current_video_title, 
+                    generate_prompt,
+                    api_key,
+                    i,
+                    chunk,
+                    style_instruction,
+                    current_video_title,
                     SELECTED_GENRE_MODE
                 ))
-            
+
             for i, future in enumerate(as_completed(futures)):
                 prompts.append(future.result())
                 progress_bar.progress((i + 1) / (total_scenes * 2))
-        
+
         prompts.sort(key=lambda x: x[0])
-        
+
         # 3. 이미지 생성 (병렬 처리 - 핵심 최적화 구간)
         status_box.write(f"🎨 이미지 생성 중 ({SELECTED_IMAGE_MODEL})...")
         results = []
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_meta = {}
             for s_num, prompt_text in prompts:
                 idx = s_num - 1
                 orig_text = chunks[idx]
                 fname = make_filename(s_num, orig_text)
-                
+
                 # [속도] 강제 sleep 제거, executor에 바로 제출
                 # [안정성] 다만 너무 동시다발적 요청을 막기 위해 아주 미세한 지연
-                time.sleep(0.05) 
-                
+                time.sleep(0.05)
+
                 future = executor.submit(
-                    generate_image, 
-                    client, 
-                    prompt_text, 
-                    fname, 
+                    generate_image,
+                    client,
+                    prompt_text,
+                    fname,
                     USER_DIR, # [수정] 전역변수 대신 사용자별 폴더 전달
                     SELECTED_IMAGE_MODEL,
-                    style_instruction 
+                    style_instruction
                 )
                 future_to_meta[future] = (s_num, fname, orig_text, prompt_text)
-            
+
             # 결과 수집
             completed_cnt = 0
             for future in as_completed(future_to_meta):
                 s_num, fname, orig_text, p_text = future_to_meta[future]
                 path = future.result()
-                
+
                 if path:
                     results.append({
                         "scene": s_num,
@@ -605,10 +607,10 @@ if start_btn:
 
                 completed_cnt += 1
                 progress_bar.progress(0.5 + (completed_cnt / total_scenes * 0.5))
-        
+
         results.sort(key=lambda x: x['scene'])
         st.session_state['generated_results'] = results
-        
+
         status_box.update(label="✅ 생성 완료!", state="complete", expanded=False)
 
 # ==========================================
@@ -621,23 +623,23 @@ if st.session_state['generated_results']:
 
     st.divider()
     st.markdown(f"## 📸 결과물 ({len(st.session_state['generated_results'])}장)")
-    
+
     # 전체 다운로드 버튼
     zip_data = create_zip_buffer(CURRENT_USER_DIR) # [수정] 사용자 폴더 압축
     st.download_button("📦 전체 이미지 ZIP 다운로드", data=zip_data, file_name="all_images.zip", mime="application/zip", use_container_width=True)
-    
+
     st.markdown("---")
 
     # 개별 리스트 출력
     for index, item in enumerate(st.session_state['generated_results']):
         with st.container(border=True):
             cols = st.columns([1, 2])
-            
+
             # [왼쪽] 이미지 및 재생성 버튼
             with cols[0]:
                 try: st.image(item['path'], use_container_width=True)
                 except: st.error("이미지 파일 없음")
-                
+
                 # 이미지 개별 재생성 버튼
                 if st.button(f"🔄 이미지 다시 생성", key=f"regen_img_{index}", use_container_width=True):
                     if not api_key:
@@ -645,22 +647,22 @@ if st.session_state['generated_results']:
                     else:
                         with st.spinner(f"Scene {item['scene']} 다시 그리는 중..."):
                             client = genai.Client(api_key=api_key)
-                            
+
                             # 1. 프롬프트 다시 생성
                             current_title = st.session_state.get('video_title', '')
                             _, new_prompt = generate_prompt(
                                 api_key, index, item['script'], style_instruction,
                                 current_title, SELECTED_GENRE_MODE
                             )
-                            
+
                             # 2. 이미지 생성
                             # [수정] 재생성 시에도 사용자별 경로 사용
                             new_path = generate_image(
-                                client, new_prompt, item['filename'], 
+                                client, new_prompt, item['filename'],
                                 CURRENT_USER_DIR, SELECTED_IMAGE_MODEL,
-                                style_instruction 
+                                style_instruction
                             )
-                            
+
                             if new_path:
                                 st.session_state['generated_results'][index]['path'] = new_path
                                 st.session_state['generated_results'][index]['prompt'] = new_prompt
@@ -674,10 +676,10 @@ if st.session_state['generated_results']:
             with cols[1]:
                 st.markdown(f"### Scene {item['scene']:02d}")
                 st.markdown(f"**대본:**\n\n{item['script']}")
-                
+
                 with st.expander("📝 프롬프트 확인"):
                     st.text(item['prompt'])
-                
+
                 st.write("")
                 try:
                     with open(item['path'], "rb") as file:
