@@ -8,6 +8,7 @@ import re
 import shutil
 import zipfile
 import gc 
+import uuid  # [수정] 고유 ID 생성을 위해 추가
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
@@ -23,6 +24,10 @@ st.set_page_config(
     page_icon="🎨",
     initial_sidebar_state="expanded"
 )
+
+# [수정] 사용자별 고유 세션 ID 생성 (접속자끼리 폴더 겹침 방지)
+if 'user_id' not in st.session_state:
+    st.session_state['user_id'] = str(uuid.uuid4())
 
 # ==========================================
 # [디자인] 다크모드 & 빅 텍스트 CSS 적용 (원본 유지)
@@ -175,9 +180,8 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# 파일 저장 경로 설정
+# 파일 저장 경로 설정 (기본 루트)
 BASE_PATH = "./web_result_files"
-IMAGE_OUTPUT_DIR = os.path.join(BASE_PATH, "output_images")
 
 # 텍스트 모델 설정 (프롬프트 작성용)
 GEMINI_TEXT_MODEL_NAME = "gemini-2.5-pro" 
@@ -185,11 +189,6 @@ GEMINI_TEXT_MODEL_NAME = "gemini-2.5-pro"
 # ==========================================
 # [함수] 1. 기본 유틸리티
 # ==========================================
-def init_folders():
-    """이미지 저장 폴더 초기화"""
-    if not os.path.exists(IMAGE_OUTPUT_DIR):
-        os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
-
 def split_script_by_time(script, chars_per_chunk=100):
     """대본을 적절한 길이로 나누기"""
     temp_sentences = script.replace(".", ".|").replace("?", "?|").replace("!", "!|").split("|")
@@ -235,7 +234,7 @@ def create_zip_buffer(source_dir):
     return buffer
 
 # ==========================================
-# [함수] 2. 프롬프트 생성 (안정성 최적화)
+# [함수] 2. 프롬프트 생성 (지시사항 원본 복구 + 안전장치 추가)
 # ==========================================
 def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, genre_mode="info"):
     scene_num = index + 1
@@ -246,7 +245,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     lang_guide = "화면 속 글씨는 **무조건 '한글(Korean)'로 표기**하십시오. (다른 언어 절대 금지)"
     lang_example = "(예: 'New York' -> '뉴욕', 'Tokyo' -> '도쿄')"
 
-    # [모드 고정] 밝은 정보/이슈 (Bright & Flat)
+    # [중요] 원본 프롬프트 지시사항 100% 유지
     full_instruction = f"""
     [역할]
     당신은 복잡한 상황을 아주 쉽고 직관적인 그림으로 표현하는 '비주얼 커뮤니케이션 전문가'이자 '교육용 일러스트레이터'입니다.
@@ -282,37 +281,74 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     - 부가적인 설명 없이 **오직 프롬프트 텍스트만** 출력하십시오.
     """
     
+    # 2. 비상 요청 (안전 필터 걸렸을 때 순화용)
+    instruction_safe = f"""
+    [Constraint] The previous request was blocked. 
+    Write a VERY SAFE, abstract, educational illustration description about: "{video_title}"
+    Do NOT include specific violent or sensitive details from the script.
+    Just describe a bright, 2D vector art style background suitable for the topic.
+    (Language: Korean)
+    """
+
     payload = {
-        "contents": [{"parts": [{"text": f"지시사항(Instruction):\n{full_instruction}\n\n대본 내용(Script Segment):\n\"{text_chunk}\"\n\n이미지 프롬프트 결과:"}]}]
+        "contents": [{"parts": [{"text": f"지시사항(Instruction):\n{full_instruction}\n\n대본 내용(Script Segment):\n\"{text_chunk}\"\n\n이미지 프롬프트 결과:"}]}],
+        "safety_settings": [
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+        ]
     }
 
-    # [최적화] 대기 시간 로직 개선
-    for attempt in range(1, 4):
+    # [핵심] 재시도 횟수 5회 & 랜덤 대기 (병렬 충돌 방지)
+    max_retries = 5
+    
+    for attempt in range(1, max_retries + 1):
         try:
-            response = requests.post(url, headers=headers, data=json.dumps(payload))
-            if response.status_code == 200:
-                try:
-                    prompt = response.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-                except:
-                    prompt = text_chunk
-                return (scene_num, prompt)
+            # 병렬 처리 시 동시 요청 충돌을 막기 위한 랜덤 지연 (Jitter)
+            time.sleep(random.uniform(0.1, 0.6))
             
-            # 에러 발생 시에만 대기 (스마트 대기)
-            elif response.status_code in [429, 503, 500]:
-                time.sleep(1.5 * attempt)
+            response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # 정상 응답 확인
+                if 'candidates' in data and data['candidates']:
+                    result = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                    # 결과가 너무 짧거나(오류), 대본과 100% 똑같으면(단순복사) 실패로 간주하고 재시도
+                    if len(result) < 5 or result == text_chunk:
+                          continue
+                    return (scene_num, result)
+                else:
+                    # 응답은 왔으나 내용이 비어있음 (안전 필터 차단)
+                    print(f"🛡️ Scene {scene_num}: 내용 차단됨. 안전 모드로 전환.")
+                    payload["contents"][0]["parts"][0]["text"] = instruction_safe
+                    continue
+
+            elif response.status_code == 429:
+                # [속도 제한] 병렬 처리 시 가장 많이 발생
+                wait_time = (2 ** attempt) + random.uniform(0, 2)
+                print(f"⚡ Scene {scene_num}: 과부하(429). {wait_time:.1f}초 대기 후 재시도...")
+                time.sleep(wait_time)
                 continue
+            
             else:
-                return (scene_num, f"Error generating prompt: {response.status_code}")
+                time.sleep(1)
+                continue
+
         except Exception as e:
             time.sleep(1)
             continue
-            
-    # 모든 시도 실패 시 원문 반환
-    return (scene_num, f"일러스트 묘사: {text_chunk}")
+
+    # [최후의 안전장치] 절대 대본 원문을 반환하지 않음
+    print(f"❌ Scene {scene_num}: 최종 실패. 제목 기반 기본 프롬프트 사용.")
+    fallback_prompt = f"주제 '{video_title}'에 어울리는 밝고 깔끔한 교육용 2D 일러스트 배경. 텍스트 없이 심플하게."
+    return (scene_num, fallback_prompt)
 
 # ==========================================
 # [함수] 3. 이미지 생성 (속도 & 안정성 하이브리드)
 # ==========================================
+# [수정] output_dir를 인자로 받도록 변경
 def generate_image(client, prompt, filename, output_dir, selected_model_name, style_instruction):
     full_path = os.path.join(output_dir, filename)
     
@@ -349,7 +385,6 @@ def generate_image(client, prompt, filename, output_dir, selected_model_name, st
                         image = Image.open(BytesIO(img_data))
                         image.save(full_path)
                         
-                        # [속도 향상] 여기서 gc.collect() 삭제하고 가벼운 삭제만 수행
                         image.close()
                         del img_data
                         del image
@@ -470,14 +505,20 @@ if start_btn:
     elif not script_input:
         st.warning("⚠️ 대본을 입력해주세요.")
     else:
-        # 초기화 및 폴더 준비
+        # [수정] 사용자별 고유 폴더 경로 설정 (충돌 방지 핵심)
+        user_id = st.session_state['user_id']
+        USER_DIR = os.path.join(BASE_PATH, user_id, "output_images")
+        
+        # 초기화 및 폴더 준비 (내 폴더만 지웠다 다시 생성)
         st.session_state['generated_results'] = [] 
-        if os.path.exists(IMAGE_OUTPUT_DIR):
+        if os.path.exists(USER_DIR):
             try:
-                shutil.rmtree(IMAGE_OUTPUT_DIR)
+                shutil.rmtree(USER_DIR)
             except Exception as e:
                 print(f"Error removing dir: {e}")
-        init_folders()
+        
+        # 폴더 생성
+        os.makedirs(USER_DIR, exist_ok=True)
         
         client = genai.Client(api_key=api_key)
         
@@ -494,7 +535,7 @@ if start_btn:
         if not current_video_title:
             current_video_title = "전반적인 대본 분위기에 어울리는 배경 (Context based on the script)"
 
-        # 2. 프롬프트 생성 (병렬)
+        # 2. 프롬프트 생성 (병렬 - 수정된 강력한 함수 사용)
         status_box.write(f"📝 프롬프트 작성 중... (Mode: Bright & Flat)")
         prompts = []
         
@@ -539,7 +580,7 @@ if start_btn:
                     client, 
                     prompt_text, 
                     fname, 
-                    IMAGE_OUTPUT_DIR, 
+                    USER_DIR, # [수정] 전역변수 대신 사용자별 폴더 전달
                     SELECTED_IMAGE_MODEL,
                     style_instruction 
                 )
@@ -574,11 +615,15 @@ if start_btn:
 # [결과 화면] 리스트 및 재생성
 # ==========================================
 if st.session_state['generated_results']:
+    # [수정] 결과 다운로드를 위해 현재 사용자의 폴더 경로 다시 계산
+    user_id = st.session_state['user_id']
+    CURRENT_USER_DIR = os.path.join(BASE_PATH, user_id, "output_images")
+
     st.divider()
     st.markdown(f"## 📸 결과물 ({len(st.session_state['generated_results'])}장)")
     
     # 전체 다운로드 버튼
-    zip_data = create_zip_buffer(IMAGE_OUTPUT_DIR)
+    zip_data = create_zip_buffer(CURRENT_USER_DIR) # [수정] 사용자 폴더 압축
     st.download_button("📦 전체 이미지 ZIP 다운로드", data=zip_data, file_name="all_images.zip", mime="application/zip", use_container_width=True)
     
     st.markdown("---")
@@ -609,9 +654,10 @@ if st.session_state['generated_results']:
                             )
                             
                             # 2. 이미지 생성
+                            # [수정] 재생성 시에도 사용자별 경로 사용
                             new_path = generate_image(
                                 client, new_prompt, item['filename'], 
-                                IMAGE_OUTPUT_DIR, SELECTED_IMAGE_MODEL,
+                                CURRENT_USER_DIR, SELECTED_IMAGE_MODEL,
                                 style_instruction 
                             )
                             
