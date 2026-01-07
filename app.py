@@ -271,7 +271,7 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     제공된 대본 조각(Script Segment)을 바탕으로, 이미지 생성 AI가 그릴 수 있는 **구체적인 묘사 프롬프트**를 작성하십시오.
 
     [작성 요구사항]
-    - **분량:** 최소 5문장 이상으로 상세하게 묘사.
+    - **분량:** 최소 6문장 이상으로 상세하게 묘사.
     - **포함 요소:**
         - **캐릭터 행동:** 대본의 상황을 연기하는 캐릭터의 구체적인 동작.
         - **배경:** 상황을 설명하는 소품이나 장소 (배경은 깔끔하게).
@@ -685,3 +685,4 @@ if st.session_state['generated_results']:
                     with open(item['path'], "rb") as file:
                         st.download_button("⬇️ 이미지 저장", data=file, file_name=item['filename'], mime="image/png", key=f"btn_down_{item['scene']}")
                 except: pass
+
