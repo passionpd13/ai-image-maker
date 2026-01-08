@@ -36,8 +36,8 @@ st.markdown("""
     <style>
     /* [긴급 수정 1] 상단 흰색 바 제거 및 여백 삭제 */
     header[data-testid="stHeader"] {
-        background-color: #0E1117 !important; /* 헤더 배경을 어둡게 */
-        visibility: hidden !important; /* 헤더 숨김 */
+        background-color: #0E1117 !important; /* 배경을 어둡게 해서 눈에 안 띄게 처리 */
+        /* visibility: hidden !important;  <-- 이 줄을 삭제하거나 주석 처리하세요! */
     }
     .block-container {
         padding-top: 2rem !important; /* 상단 여백 최소화 */
@@ -685,4 +685,5 @@ if st.session_state['generated_results']:
                     with open(item['path'], "rb") as file:
                         st.download_button("⬇️ 이미지 저장", data=file, file_name=item['filename'], mime="image/png", key=f"btn_down_{item['scene']}")
                 except: pass
+
 
