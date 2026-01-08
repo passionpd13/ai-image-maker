@@ -234,18 +234,19 @@ def create_zip_buffer(source_dir):
     return buffer
 
 # ==========================================
-# [함수] 2. 프롬프트 생성 (오류 수정됨)
+# [함수] 2. 프롬프트 생성 (3-Pro-Preview 우선 -> 2.5-Flash 백업)
 # ==========================================
 def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, genre_mode="info"):
     scene_num = index + 1
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TEXT_MODEL_NAME}:generateContent?key={api_key}"
-    headers = {'Content-Type': 'application/json'}
+    
+    # [수정] requests 대신 안정적인 SDK 클라이언트 사용 (최신 모델 호환성 확보)
+    client = genai.Client(api_key=api_key)
 
-    # [언어 고정] 무조건 한국어
+    # [언어 고정]
     lang_guide = "화면 속 글씨는 **무조건 '한글(Korean)'로 표기**하십시오. (다른 언어 절대 금지)"
     lang_example = "(예: 'New York' -> '뉴욕', 'Tokyo' -> '도쿄')"
 
-    # [중요] 원본 프롬프트 지시사항 100% 유지 + 제목 텍스트화 방지 추가
+    # [중요] 원본 프롬프트 지시사항 100% 유지
     full_instruction = f"""
     [역할]
     당신은 복잡한 상황을 아주 쉽고 직관적인 그림으로 표현하는 '비주얼 커뮤니케이션 전문가'이자 '교육용 일러스트레이터'입니다.
@@ -277,12 +278,15 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
         - **배경:** 상황을 설명하는 소품이나 장소 (배경은 깔끔하게).
         - **시각적 은유:** 추상적인 내용일 경우, 이를 설명할 수 있는 시각적 아이디어 (예: 돈이 날아가는 모습, 그래프가 하락하는 모습 등).
 
+    [대본 내용]
+    "{text_chunk}"
+
     [출력 형식]
     - **무조건 한국어(한글)**로만 작성하십시오.
     - 부가적인 설명 없이 **오직 프롬프트 텍스트만** 출력하십시오.
     """
 
-    # 2. 비상 요청 (안전 필터 걸렸을 때 순화용)
+    # 안전 모드 프롬프트 (필터 걸렸을 때 순화용)
     instruction_safe = f"""
     [Constraint] The previous request was blocked.
     Write a VERY SAFE, abstract, educational illustration description about: "{video_title}"
@@ -292,58 +296,62 @@ def generate_prompt(api_key, index, text_chunk, style_instruction, video_title, 
     (Language: Korean)
     """
 
-    payload = {
-        "contents": [{"parts": [{"text": f"지시사항(Instruction):\n{full_instruction}\n\n대본 내용(Script Segment):\n\"{text_chunk}\"\n\n이미지 프롬프트 결과:"}]}],
-        "safety_settings": [
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-        ]
-    }
-
-    # [핵심] 재시도 횟수 5회 & 랜덤 대기 (병렬 충돌 방지)
-    max_retries = 5
+    max_retries = 3
+    
+    # [핵심 로직] 전역 변수(2.5-pro) 무시하고, 여기서 지정한 순서대로 시도
+    # 1순위: 3-Pro-Preview (요청하신 고성능 모델)
+    # 2순위: 2.5-Flash (요청하신 백업 모델)
+    target_models = ["gemini-3-pro-preview", "gemini-2.5-flash"]
 
     for attempt in range(1, max_retries + 1):
-        try:
-            # 병렬 처리 시 동시 요청 충돌을 막기 위한 랜덤 지연 (Jitter)
-            time.sleep(random.uniform(0.1, 0.6))
+        for model_name in target_models:
+            try:
+                # 병렬 처리 충돌 방지 딜레이
+                time.sleep(random.uniform(0.2, 0.7))
 
-            response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=full_instruction,
+                    config=types.GenerateContentConfig(
+                        temperature=0.7,
+                        safety_settings=[
+                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_ONLY_HIGH"),
+                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_ONLY_HIGH"),
+                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_ONLY_HIGH"),
+                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_ONLY_HIGH"),
+                        ]
+                    )
+                )
 
-            if response.status_code == 200:
-                data = response.json()
-                # 정상 응답 확인
-                if 'candidates' in data and data['candidates']:
-                    result = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                    # 결과가 너무 짧거나(오류), 대본과 100% 똑같으면(단순복사) 실패로 간주하고 재시도
+                if response.text:
+                    result = response.text.strip()
+                    # 결과 검증 (너무 짧거나 대본과 동일하면 실패)
                     if len(result) < 5 or result == text_chunk:
-                          continue
+                         continue
+                    
+                    # 성공 시 결과 반환
                     return (scene_num, result)
-                else:
-                    # 응답은 왔으나 내용이 비어있음 (안전 필터 차단)
-                    print(f"🛡️ Scene {scene_num}: 내용 차단됨. 안전 모드로 전환.")
-                    payload["contents"][0]["parts"][0]["text"] = instruction_safe
+
+            except Exception as e:
+                error_msg = str(e)
+                
+                # 모델 미지원(404)이나 요청 오류(400) -> 즉시 다음 모델(2.5 Flash)로 전환
+                if "404" in error_msg or "400" in error_msg or "Not Found" in error_msg:
+                    # print(f"⚠️ Scene {scene_num}: '{model_name}' 패스 -> 백업 모델 시도.")
+                    continue 
+                
+                # 안전 필터 걸림 -> 안전 프롬프트로 교체 후 현재 모델 재시도
+                if "SAFETY" in error_msg or "block" in error_msg.lower():
+                    print(f"🛡️ Scene {scene_num}: 안전 필터 작동. 순화된 프롬프트 사용.")
+                    full_instruction = instruction_safe
                     continue
 
-            elif response.status_code == 429:
-                # [속도 제한] 병렬 처리 시 가장 많이 발생
-                wait_time = (2 ** attempt) + random.uniform(0, 2)
-                print(f"⚡ Scene {scene_num}: 과부하(429). {wait_time:.1f}초 대기 후 재시도...")
-                time.sleep(wait_time)
-                continue
-
-            else:
+                # 과부하(429) 등 기타 에러 -> 잠시 대기
+                print(f"⚡ Scene {scene_num}: 에러 ({error_msg}). 재시도 중...")
                 time.sleep(1)
-                continue
 
-        except Exception as e:
-            time.sleep(1)
-            continue
-
-    # [최후의 안전장치] 절대 대본 원문을 반환하지 않음
-    print(f"❌ Scene {scene_num}: 최종 실패. 제목 기반 기본 프롬프트 사용.")
+    # 모든 시도 실패 시 (최후의 안전장치)
+    print(f"❌ Scene {scene_num}: 최종 실패. 기본 프롬프트 사용.")
     fallback_prompt = f"주제 '{video_title}'에 어울리는 밝고 깔끔한 교육용 2D 일러스트 배경. (제목 텍스트 절대 금지) 텍스트 없이 심플하게."
     return (scene_num, fallback_prompt)
 
@@ -685,5 +693,6 @@ if st.session_state['generated_results']:
                     with open(item['path'], "rb") as file:
                         st.download_button("⬇️ 이미지 저장", data=file, file_name=item['filename'], mime="image/png", key=f"btn_down_{item['scene']}")
                 except: pass
+
 
 
